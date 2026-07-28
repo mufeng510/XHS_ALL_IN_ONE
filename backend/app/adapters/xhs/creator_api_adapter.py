@@ -9,37 +9,29 @@ class XhsCreatorApiAdapter:
     def __init__(self, cookies: str) -> None:
         self.cookies = cookies
 
+    def _api(self):
+        from apis.xhs_creator_apis import XHS_Creator_Apis
+        from xhs_utils.xhs_creator import XHSCreatorAuth
+
+        auth = XHSCreatorAuth.from_cookie(self.cookies)
+        return XHS_Creator_Apis(auth)
+
     def get_topic(self, keyword: str) -> Any:
         with direct_xhs_request_env():
-            from apis.xhs_creator_apis import XHS_Creator_Apis
-            from xhs_utils.cookie_util import trans_cookies
-
-            api = XHS_Creator_Apis()
-            return api.get_topic(keyword=keyword, cookies=trans_cookies(self.cookies))
+            return self._api().get_topic(keyword=keyword)
 
     def get_location_info(self, keyword: str) -> Any:
         with direct_xhs_request_env():
-            from apis.xhs_creator_apis import XHS_Creator_Apis
-            from xhs_utils.cookie_util import trans_cookies
-
-            api = XHS_Creator_Apis()
-            return api.get_location_info(keyword=keyword, cookies=trans_cookies(self.cookies))
+            return self._api().get_location_info(keyword=keyword)
 
     def get_published_notes(self) -> Any:
         with direct_xhs_request_env():
-            from apis.xhs_creator_apis import XHS_Creator_Apis
-
-            api = XHS_Creator_Apis()
-            return api.get_all_publish_note_info(cookies_str=self.cookies)
+            return self._api().get_all_posted_notes()
 
     def upload_media(self, file_path: str, media_type: str) -> dict[str, Any]:
         file_data = self._resolve_file_data(file_path)
         with direct_xhs_request_env():
-            from apis.xhs_creator_apis import XHS_Creator_Apis
-            from xhs_utils.cookie_util import trans_cookies
-
-            api = XHS_Creator_Apis()
-            success, message, payload = api.upload_media(file_data, media_type, trans_cookies(self.cookies))
+            success, message, payload = self._api().upload_media(file_data, media_type)
         if not success:
             raise RuntimeError(message or "Creator media upload failed")
         return payload or {}
@@ -87,33 +79,30 @@ class XhsCreatorApiAdapter:
             if note_info.get("media_type") == "image" and note_info.get("image_file_infos"):
                 return self._post_uploaded_image_note(note_info)
 
-            from apis.xhs_creator_apis import XHS_Creator_Apis
-
-            api = XHS_Creator_Apis()
-            success, message, payload = api.post_note(note_info, self.cookies)
+            success, message, payload = self._api().post_note(note_info)
         if not success:
             raise RuntimeError(message or "Creator note publish failed")
         return payload or {}
 
     def _post_uploaded_image_note(self, note_info: dict[str, Any]) -> dict[str, Any]:
-        import json
-
-        import requests
         from apis.xhs_creator_apis import XHS_Creator_Apis
-        from xhs_utils.cookie_util import trans_cookies
         from xhs_utils.http_util import REQUEST_TIMEOUT
-        from xhs_utils.xhs_creator_util import generate_xs_xs_common, get_post_note_headers, get_post_note_image_data
-        from xhs_utils.xhs_util import generate_x_rap_param
+        from xhs_utils.xhs_creator import XHSCreatorAuth
+        from xhs_utils.xhs_creator_util import (
+            get_post_note_image_data,
+            load_creator_rap_fingerprint_hex,
+        )
+        from xhs_utils.xhs_pc.params import generate_x_rap_param
 
-        api = XHS_Creator_Apis()
+        auth = XHSCreatorAuth.from_cookie(self.cookies)
+        api = XHS_Creator_Apis(auth)
         post_api = "/web_api/sns/v2/note"
-        cookies = trans_cookies(self.cookies)
         post_loc = {}
         location = note_info.get("location")
         if isinstance(location, dict):
             post_loc = location
         elif isinstance(location, str) and location.strip():
-            success, message, location_info = api.get_location_info(location.strip(), cookies)
+            success, message, location_info = api.get_location_info(location.strip())
             if not success:
                 raise RuntimeError(message or "Creator location lookup failed")
             poi_list = (location_info.get("data") or {}).get("poi_list") or []
@@ -134,10 +123,13 @@ class XhsCreatorApiAdapter:
             note_info.get("type", 1),
             note_info["image_file_infos"],
         )
+        # 浏览器实抓：未选地点时省略 post_loc 键，空对象会被服务端以参数错误打回
+        if not post_loc:
+            data["common"].pop("post_loc", None)
         for topic in note_info.get("topics") or []:
             if not isinstance(topic, str) or not topic.strip():
                 continue
-            success, message, topic_payload = api.get_topic(topic.strip(), cookies)
+            success, message, topic_payload = api.get_topic(topic.strip())
             if not success:
                 raise RuntimeError(message or "Creator topic lookup failed")
             topic_items = (topic_payload.get("data") or {}).get("topic_info_dtos") or []
@@ -152,19 +144,29 @@ class XhsCreatorApiAdapter:
             }
             data["common"]["hash_tag"].append(insert_topic)
             data["common"]["desc"] += f" #{insert_topic['name']}[话题]# "
-        raw_data = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-        headers = get_post_note_headers()
-        xs, xt, xs_common = generate_xs_xs_common(cookies["a1"], post_api, raw_data)
-        headers["x-s"], headers["x-t"], headers["x-s-common"] = xs, str(xt), xs_common
-        headers["x-rap-param"] = generate_x_rap_param(post_api, raw_data)
-        response = requests.post(
+        headers, cookies, body = api._request_params(
+            post_api,
+            data,
+            "POST",
+            referer=f"{api.base_url}/",
+            target_origin=api.edith_url,
+            order_wire_headers=False,
+        )
+        headers["x-rap-param"] = generate_x_rap_param(
+            post_api,
+            body,
+            fingerprint_hex=load_creator_rap_fingerprint_hex(),
+        )
+        response = api.http.post(
             api.edith_url + post_api,
             headers=headers,
-            data=raw_data.encode("utf-8"),
+            data=body.encode("utf-8"),
             cookies=cookies,
             timeout=REQUEST_TIMEOUT,
         )
         payload = response.json()
         if not payload.get("success"):
-            raise RuntimeError(payload.get("msg") or "Creator note publish failed")
+            raise RuntimeError(
+                payload.get("msg") or payload.get("message") or "Creator note publish failed"
+            )
         return payload

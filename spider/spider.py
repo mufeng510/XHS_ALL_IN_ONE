@@ -4,11 +4,18 @@ from loguru import logger
 from apis.xhs_pc_apis import XHS_Apis
 from xhs_utils.common_util import init
 from xhs_utils.data_util import handle_note_info, download_note, save_to_xlsx
+from xhs_utils.xhs_pc import XHSPcAuth
 
 
 class Data_Spider():
     def __init__(self):
-        self.xhs_apis = XHS_Apis()
+        self._apis_cache = {}
+
+    def _api(self, cookies_str: str):
+        if cookies_str not in self._apis_cache:
+            auth = XHSPcAuth.from_cookie(cookies_str)
+            self._apis_cache[cookies_str] = XHS_Apis(auth)
+        return self._apis_cache[cookies_str]
 
     def spider_note(self, note_url: str, cookies_str: str, proxies=None):
         """
@@ -19,7 +26,7 @@ class Data_Spider():
         """
         note_info = None
         try:
-            success, msg, note_info = self.xhs_apis.get_note_info(note_url, cookies_str, proxies)
+            success, msg, note_info = self._api(cookies_str).get_note_info(note_url, proxies=proxies)
             if success:
                 note_info = note_info['data']['items'][0]
                 note_info['url'] = note_url
@@ -63,7 +70,7 @@ class Data_Spider():
         """
         note_list = []
         try:
-            success, msg, all_note_info = self.xhs_apis.get_user_all_notes(user_url, cookies_str, proxies)
+            success, msg, all_note_info = self._api(cookies_str).get_user_all_notes(user_url, proxies=proxies)
             if success:
                 logger.info(f'用户 {user_url} 作品数量: {len(all_note_info)}')
                 for simple_note_info in all_note_info:
@@ -94,7 +101,7 @@ class Data_Spider():
         """
         note_list = []
         try:
-            success, msg, notes = self.xhs_apis.search_some_note(query, require_num, cookies_str, sort_type_choice, note_type, note_time, note_range, pos_distance, geo, proxies)
+            success, msg, notes = self._api(cookies_str).search_some_note(query, require_num, sort_type_choice, note_type, note_time, note_range, pos_distance, geo, proxies=proxies)
             if success:
                 notes = list(filter(lambda x: x['model_type'] == "note", notes))
                 logger.info(f'搜索关键词 {query} 笔记数量: {len(notes)}')

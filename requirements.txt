@@ -23,4 +23,5 @@ passlib[bcrypt]
 python-jose[cryptography]
 Pillow>=9.2
 pyyaml
-pymysql
+
+curl_cffi
